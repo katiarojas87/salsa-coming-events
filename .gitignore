@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+salsa_events_*.json
+*.log
+.DS_Store
