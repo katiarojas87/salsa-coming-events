@@ -314,6 +314,21 @@ def parse_detail(html: str, event: dict) -> dict:
         elif 'omschrijving' in label or 'beschrijving' in label or 'description' in label:
             updated['description'] = value[:300]
 
+    # ── Description from free-floating div block ──────────────────────────────
+    # The description appears as a <div><p>...</p><p>...</p></div> block
+    # outside the structured table — grab all <p> content from it
+    if not updated.get('description'):
+        # Find div blocks that contain multiple <p> tags with real content
+        div_blocks = re.findall(r'<div[^>]*>([\s\S]*?)</div>', html, re.IGNORECASE)
+        for block in div_blocks:
+            paragraphs = re.findall(r'<p[^>]*>([\s\S]*?)</p>', block, re.IGNORECASE)
+            texts = [inner_text(p) for p in paragraphs if inner_text(p).strip()]
+            if len(texts) >= 2:  # at least 2 non-empty paragraphs = real description
+                desc = '\n'.join(texts).strip()
+                if len(desc) > 80:  # long enough to be a real description
+                    updated['description'] = desc[:2000]
+                    break
+
     # Facebook
     fb = re.search(r'href="(https://(?:www\.)?facebook\.com/(?:events/)?\S+)"', html)
     if fb:

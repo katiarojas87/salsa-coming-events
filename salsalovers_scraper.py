@@ -173,10 +173,6 @@ def collect_urls(html: str) -> list:
 # ─── STEP 2: PARSE DETAIL PAGE ────────────────────────────────────────────────
 
 def parse_detail(html: str, stub: dict) -> dict:
-    """
-    Extract ALL event data from the detail page.
-    Returns None if the event is not on a target weekend date.
-    """
     event = {
         "source":        "SalsaLovers",
         "id":            stub["id"],
@@ -200,19 +196,15 @@ def parse_detail(html: str, stub: dict) -> dict:
     }
 
     # ── Name ──────────────────────────────────────────────────────────────────
-    for pattern in [
-        r'<h1[^>]*class="[^"]*c-event[^"]*"[^>]*>(.*?)</h1>',
-        r'<h1[^>]*>(.*?)</h1>',
-        r'property="og:title"\s+content="([^"]+)"',
-        r'<title>([^<|]+)',
-    ]:
-        m = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
-        if m:
-            name = inner_text(m.group(1))
-            name = re.sub(r'\s*[|\-–]\s*[Ss]alsa[Ll]overs.*$', '', name).strip()
-            if name and len(name) > 2 and 'salsalovers' not in name.lower():
-                event['name'] = name
-                break
+    # From inspect: <div class="c-event__header__title">Merecumbé Latin SunDay</div>
+    name_m = re.search(
+        r'class="[^"]*c-event__header__title[^"]*"[^>]*>\s*([^<]+?)\s*</div>',
+        html, re.IGNORECASE
+    )
+    if name_m:
+        name = name_m.group(1).strip()
+        if name and len(name) > 2 and 'salsalovers' not in name.lower():
+            event['name'] = name
 
     # Fallback: JSON-LD name
     if not event['name']:
@@ -226,13 +218,12 @@ def parse_detail(html: str, stub: dict) -> dict:
                 for item in items:
                     if item.get('@type') in ('Event', 'DanceEvent', 'SocialEvent'):
                         if item.get('name'):
-                            event['name'] = item['name']
+                            event['name'] = item['name'].strip()
                             break
             except Exception:
                 pass
 
-    # ── Date & Time ───────────────────────────────────────────────────────────
-    # Look for Dutch date pattern anywhere in the page
+    # ── Date ──────────────────────────────────────────────────────────────────
     date_m = re.search(
         r'(vrijdag|zaterdag|zondag|maandag|dinsdag|woensdag|donderdag)\s+'
         r'(\d{1,2})\s+'
@@ -247,21 +238,12 @@ def parse_detail(html: str, stub: dict) -> dict:
         month_word = date_m.group(3).lower()
         year       = int(date_m.group(4)) if date_m.group(4) else date.today().year
         try:
-            event_date       = date(year, NL_MONTHS[month_word], day_num)
+            event_date        = date(year, NL_MONTHS[month_word], day_num)
             event['date']     = str(event_date)
             event['date_text']= f"{day_word} {day_num} {month_word} {year}"
             event['day']      = NL_DAYS.get(event_date.weekday(), "").lower()
         except ValueError:
             pass
-
-    # Time: "om 20u00" or "20:00"
-    time_m = re.search(r'om\s+(\d{1,2})u(\d{2})', html, re.IGNORECASE)
-    if time_m:
-        event['time'] = f"{time_m.group(1)}:{time_m.group(2)}"
-    else:
-        time_m = re.search(r'\b(\d{1,2}):(\d{2})\b', html)
-        if time_m:
-            event['time'] = f"{time_m.group(1)}:{time_m.group(2)}"
 
     # JSON-LD date fallback
     if not event['date']:
@@ -280,12 +262,42 @@ def parse_detail(html: str, stub: dict) -> dict:
                             event['date']     = str(parsed)
                             event['date_text']= str(parsed)
                             event['day']      = NL_DAYS.get(parsed.weekday(), "").lower()
-                        if item.get('startDate') and 'T' in item['startDate']:
-                            t = item['startDate'].split('T')[1][:5]
-                            event['time'] = t
                         break
             except Exception:
                 pass
+
+    # ── Time ──────────────────────────────────────────────────────────────────
+    # From inspect, structure is:
+    # <div class="c-event__date__doors ...">
+    #   <div class="c-event__date-wrapper ...">
+    #     <div class="c-event__date__title ...">Deuren:</div>
+    #     <div ...> 19u00 </div>           ← start time
+    #   </div>
+    #   <div class="c-event__date-wrapper ...">
+    #     <div class="c-event__date__title ...">Einde:</div>
+    #     <div ...>23u00 </div>            ← end time
+    #   </div>
+    # </div>
+
+    # Step 1: find the Deuren time
+    deuren_m = re.search(
+        r'Deuren:</div>\s*<div[^>]*>\s*(\d{1,2})u(\d{2})\s*</div>',
+        html, re.IGNORECASE
+    )
+    # Step 2: find the Einde time
+    einde_m = re.search(
+        r'Einde:</div>\s*<div[^>]*>\s*(\d{1,2})u(\d{2})\s*</div>',
+        html, re.IGNORECASE
+    )
+
+    if deuren_m and einde_m:
+        start = f"{deuren_m.group(1)}:{deuren_m.group(2)}"
+        end   = f"{einde_m.group(1)}:{einde_m.group(2)}"
+        event['time'] = f"{start} - {end}"
+    elif deuren_m:
+        event['time'] = f"{deuren_m.group(1)}:{deuren_m.group(2)}"
+    elif einde_m:
+        event['time'] = f"{einde_m.group(1)}:{einde_m.group(2)}"
 
     # ── Address ───────────────────────────────────────────────────────────────
     m = re.search(
@@ -295,7 +307,6 @@ def parse_detail(html: str, stub: dict) -> dict:
     if m:
         address = inner_text(m.group(1))
         event['address'] = address
-        # Extract city: "4811 XC Breda" → "Breda"
         city_m = re.search(
             r'\d{4}\s*[A-Z]{0,2}\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-]{1,25})',
             address
@@ -329,24 +340,31 @@ def parse_detail(html: str, stub: dict) -> dict:
                 pass
 
     # ── Organizer ─────────────────────────────────────────────────────────────
-    for cls in ['c-event__organizer', 'c-party__organizer', 'c-event__organization']:
-        m = re.search(
-            rf'class="[^"]*{re.escape(cls)}[^"]*"[^>]*>(.*?)</',
-            html, re.DOTALL | re.IGNORECASE
-        )
-        if m:
-            event['organizer'] = inner_text(m.group(1))
-            break
+    # From inspect: <div class="c-event__header__sub-title">Georganiseerd door Merecumbe</div>
+    org_m = re.search(
+        r'c-event__header__sub-title[^>]*>\s*(?:Georganiseerd door\s*)?([^<]+?)\s*</div>',
+        html, re.IGNORECASE
+    )
+    if org_m:
+        organizer = org_m.group(1).strip()
+        organizer = re.sub(r'^Georganiseerd door\s*', '', organizer, flags=re.IGNORECASE).strip()
+        if organizer:
+            event['organizer'] = organizer
 
     # ── Description ───────────────────────────────────────────────────────────
-    m = re.search(
-        r'class="[^"]*c-event__description[^"]*"[^>]*>(.*?)</(?:div|p|section)',
-        html, re.DOTALL | re.IGNORECASE
+    desc_container = re.search(
+        r'class="[^"]*c-event__description[^"]*"[^>]*>([\s\S]{10,5000})',
+        html, re.IGNORECASE
     )
-    if m:
-        desc = inner_text(m.group(1))[:300]
-        event['description'] = desc
-        event['is_free'] = bool(re.search(r'\bgratis\b|\bfree\b', desc, re.IGNORECASE))
+    if desc_container:
+        block = desc_container.group(1)
+        paragraphs = re.findall(r'<p[^>]*>([\s\S]*?)</p>', block, re.IGNORECASE)
+        if paragraphs:
+            desc = '\n'.join(inner_text(p) for p in paragraphs if inner_text(p)).strip()
+            event['description'] = desc[:2000]
+            event['is_free'] = bool(re.search(
+                r'\bgratis\b|\bfree\b|\bentrada gratis\b', desc, re.IGNORECASE
+            ))
 
     # ── Price ─────────────────────────────────────────────────────────────────
     price_m = re.search(
